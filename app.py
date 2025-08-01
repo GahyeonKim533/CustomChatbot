@@ -1,149 +1,135 @@
 import os
-import csv
 import streamlit as st
-import pandas as pd
-import folium
-from streamlit_folium import folium_static
-from datetime import datetime
-import openai
+from langchain_openai import ChatOpenAI
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.memory import StreamlitChatMessageHistory
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
 from dotenv import load_dotenv
-from streamlit_geolocation import streamlit_geolocation
+from docx import Document
+from io import BytesIO
 
-from langchain.chat_models import ChatOpenAI
-from langchain.document_loaders import UnstructuredFileLoader
-from langchain.text_splitter import CharacterTextSplitter
-from langchain.embeddings import OpenAIEmbeddings, CacheBackedEmbeddings
-from langchain.vectorstores import FAISS
-from langchain.storage import LocalFileStore
-from langchain.prompts import ChatPromptTemplate
-from langchain.schema.runnable import RunnablePassthrough, RunnableLambda
-
-# 환경 변수를 로드합니다.
+# 환경 변수 로드
 load_dotenv()
+API_KEY = os.getenv("OPENAI_API_KEY")
+os.environ["OPENAI_API_KEY"] = API_KEY
 
-# API 키를 환경 변수에서 가져옵니다.
-API_KEY = os.getenv("API_KEY")
-os.environ["OPENAI_API_KEY"] = API_KEY 
+# Streamlit 설정
+st.set_page_config(layout="wide", page_title="자기소개서/이력서 작성 앱")
+st.title('자기소개서/이력서 작성 앱')
 
-# Langchain을 활용하기 위한 설정과 RAG 설정을 진행합니다.
-llm = ChatOpenAI(model='gpt-4',
-    temperature=0.1,
-)
+# Streamlit 기반 메시지 히스토리 (세션 저장형)
+history = StreamlitChatMessageHistory()
 
-cache_dir = LocalFileStore("./.cache/practice/")
+# LangChain 설정
+llm = ChatOpenAI(model='gpt-4o-mini', temperature=0.1)
 
-splitter = CharacterTextSplitter.from_tiktoken_encoder(
-    separator="\n",
-    chunk_size=600,
-    chunk_overlap=100,
-)
-
-loader = UnstructuredFileLoader("./refer.txt")
-
-docs = loader.load_and_split(text_splitter=splitter)
-
-embeddings = OpenAIEmbeddings()
-
-cached_embeddings = CacheBackedEmbeddings.from_bytes_store(embeddings, cache_dir)
-
-vectorstore = FAISS.from_documents(docs, cached_embeddings)
-
-retriever = vectorstore.as_retriever()
-
-# Streamlit 세션 상태를 초기화합니다. 이는 대화 내역을 저장하는 데 사용됩니다.
-if 'chat_history' not in st.session_state:
-    st.session_state.chat_history = []
-
-# 사용자 질문에 대한 응답을 처리하는 함수입니다.
-def ask_gpt(user_question):
-    # 이전 대화 내역을 기반으로 CHATGPT에게 요청할 쿼리를 생성합니다.
-    prompt = ChatPromptTemplate.from_messages(
+# 새로운 답변 생성 프롬프트
+qa_prompt = ChatPromptTemplate.from_messages(
     [
-        (
-            "system",
-            """
-            당신은 의사입니다. 응급 상황에 대한 조치 내용은 첨부된 문서를 참조하여 대답합니다. 
-            의료와 관련된 질문에 친절히 대답하며, 심각하거나 큰 질병이 우려되는 상황에서는 병원 방문을 권유하세요:
-            \n\n
-            {context}",
-            """
-        ),
-        ("human", "{question}"),
+        ("system", """
+            당신은 "인터뷰 & 이력서 & 자기소개서 코치 GPT"입니다. 당신의 주요 역할은 다음과 같습니다:
+
+1. 사용자의 이력서/자기소개서를 개선하거나 새로 작성하도록 돕습니다.
+2. 사용자가 지원하는 직무에 맞춰 모의 면접을 진행하며, 질문-답변-피드백-다음 질문의 순서를 따릅니다.
+3. IT 직군, 대학원/박사 과정 진학, 신입 및 경력직 취업 준비자를 주 대상으로 합니다.
+
+작업 방식은 다음과 같습니다:
+
+- 사용자가 이력서/자소서 최적화를 요청한 경우:
+  1. 먼저 5개 이상의 구체적인 질문을 통해 사용자 정보를 수집합니다.
+  2. 수집된 정보를 바탕으로 구체적인 수정 제안 또는 개선된 텍스트를 작성합니다.
+  3. 필요시 DOCX 문서 형식으로 생성하여 제공합니다.
+  4. 항상 문서나 내용 생성 전에 사용자에게 한 질문에 하나씩 물어보고 대답을 기다립니다.
+
+- 사용자가 이력서를 새로 만들고 싶다고 한 경우:
+  1. 최소 6개의 질문을 단계별로 하며 사용자 정보를 수집합니다.
+  2. 우선 사용자의 이름 및 주소, 연락처를 수집하고, 자소서를 이미 만들었다면 자소서를 참조합니다.
+  3. 이를 바탕으로 맞춤형 이력서를 처음부터 생성합니다.
+  4. 이력서를 생성했을때는 이력서 내용만을 출력합니다.
+  5. 필요시 DOCX 문서로 제공합니다.
+
+- 사용자가 자기소개서를 새로 만들고 싶다고 한 경우:
+  1. 최소 5개의 질문을 단계별로 하며 사용자 정보를 수집합니다.
+  2. 이력서를 이미 만들었다면 이력서를 참조합니다.
+  3. 도전정신/책임의식 등 기업이 추구하는 인재상 위주로 키워드를 질문합니다.
+  4. 이를 바탕으로 맞춤형 자기소개서를 1000자 내외로 생성합니다.
+  5. 자기소개서를 생성했을때는 자기소개서 내용만을 출력합니다.
+  6. 필요시 DOCX 문서로 제공합니다.
+
+- 사용자가 면접 연습을 요청한 경우:
+  1. 먼저 자기소개 또는 이력서를 요청합니다. 앞서 새로 만든 자소서나 이력서가 있다면 이를 참조합니다. 없다고 할 경우 넘어갑니다.
+  2. 그 다음, 사용자가 지원하는 직무명과 JD(직무 요건)를 요청합니다.
+  3. 이후, 당신은 인터뷰어 역할로 전환되어 질문을 하나씩 제시하고 답변을 기다립니다.
+  4. 사용자의 답변을 분석하여 장점, 개선점, 모범답안을 제시합니다.
+  5. 다음 질문으로 넘어가며 반복합니다.
+  6. 면접 질문은 해당 직무의 특성(예: 기술직, 제품직, 경영직 등)에 따라 맞춤화합니다.
+
+추가 규칙:
+- 한 번에 하나의 질문만 하세요.
+- 설명은 친절하고 따뜻하게, 하지만 구체적이고 실용적으로 작성하세요.
+- 사용자가 사용한 언어(예: 영어, 한국어 등)를 그대로 따라 사용하세요.
+"""
+),
+        MessagesPlaceholder(variable_name="chat_history"),
+        ("human", "{input}"),
     ]
+)
+
+# LCEL 형식으로 체인 구성
+conversation_chain = (
+    RunnablePassthrough.assign(
+        chat_history=lambda x: history.messages
     )
+    | qa_prompt
+    | llm
+    | StrOutputParser()
+)
 
-    chain = (
-        {
-            "context": retriever,
-            "question": RunnablePassthrough(),
-        }
-        | prompt
-        | llm
-    )
-    result = chain.invoke(user_question)
+# GPT 응답 함수
+def ask_gpt(user_input: str) -> str:
+    response = conversation_chain.invoke({
+        "input": user_input,
+    })
+    history.add_user_message(user_input)
+    history.add_ai_message(response)
+    return response
+
+# DOCX 파일 생성 함수
+def create_docx_file(content: str, filename: str = "문서.docx"):
+    doc = Document()
+    doc.add_heading(filename.replace(".docx", ""), level=1)
+    doc.add_paragraph(content)
+    
+    # BytesIO를 사용해 메모리 상에서 파일 생성
+    buffer = BytesIO()
+    doc.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+# 이전 메시지 출력
+for msg in history.messages:
+    role = "user" if msg.type == "human" else "assistant"
+    with st.chat_message(role):
+        st.markdown(msg.content)
+
+# 사용자 입력받기
+if user_question := st.chat_input("질문을 입력하세요"):
+    with st.chat_message("user"):
+        st.markdown(user_question)
+    with st.spinner("AI가 답변을 생성 중입니다..."):
+        ai_answer = ask_gpt(user_question)
+    with st.chat_message("assistant"):
+        st.markdown(ai_answer)
+    
+    # 다운로드 버튼을 조건부로 표시
+    if "DOCX" in ai_answer or "docx" in ai_answer:
+        # GPT의 최종 답변을 docx 파일로 변환
+        doc_file = create_docx_file(ai_answer, "작성_완료.docx")
         
-    return result.content
-
-
-# 지도 생성
-def create_map(df_hospitals, my_locations):
-    # 서울의 중심에 지도 생성
-    latitude, longitude = my_locations
-    m = folium.Map(location=[latitude, longitude], zoom_start=12)
-    # 데이터 프레임의 각 행에 대하여
-    for index, row in df_hospitals.iterrows():
-        # 마커 추가
-        folium.Marker(
-            [row['위도'], row['경도']],
-            tooltip=row['기관명'],  # 팝업에 표시될 내용row['기관명']  # 마우스 오버시 표시될 내용
-        ).add_to(m)
-        
-    folium.Marker(
-            [latitude, longitude],
-            tooltip='내 위치',
-            icon = folium.map.Icon('red')
-        ).add_to(m)
-
-    return m
-
-
-# 메인 함수입니다.
-if __name__ == "__main__":
-    df_hospitals = pd.read_csv('의료기관통합.csv', index_col = 0)
-    
-    # Streamlit 페이지 설정
-    st.set_page_config(layout="wide", page_title="LLM기반의 의료 상담 앱")
-    # HTML 컴포넌트를 사용하여 위치 정보 표시
-    # 페이지 제목
-    st.title('LLM기반의 의료 상담 앱')
-
-    # 질문 입력을 위한 텍스트 박스
-    question = st.text_input("증상을 입력하세요", "")
-
-    # 질문에 대한 답변을 생성하는 버튼
-    if st.button('AI 분석 답변 생성 시작'):
-        if question:
-            answer = ask_gpt(question)  # GPT-3 모델을 호출하여 답변을 받습니다.
-            st.session_state.chat_history.append(f"질문: {question}")
-            st.session_state.chat_history.append(f"답변: {answer}")
-            # 모든 대화 내역을 화면에 표시합니다.
-            for message in st.session_state.chat_history:
-                st.text(message)
-        else:
-            st.error("질문을 제공해주세요.")  # 필수 입력이 없을 경우 사용자에게 알림
-
-
-    st.write("#### 현재 위치를 기준으로 주변 병원을 추천드리겠습니다.")
-    location = streamlit_geolocation()
-    
-    locations = location['latitude'], location['longitude']
-    
-    th = 0.1
-    if location['latitude']:
-        print(location['latitude'])
-        try: 
-            df_hospitals = df_hospitals.loc[(abs(df_hospitals['위도'] - location['latitude'])<th) & (abs(df_hospitals['경도'] - location['longitude'])< th)]
-            map = create_map(df_hospitals, locations)
-            folium_static(map)
-        except:
-           st.write("위치 정보를 가져올 수 없습니다. 위치 서비스가 활성화되어 있는지 확인하세요.")
+        st.download_button(
+            label="DOCX 파일 다운로드",
+            data=doc_file,
+            file_name="작성_완료.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
