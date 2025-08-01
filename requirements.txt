@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 numpy
 pandas
 streamlit 
@@ -10,4 +11,18 @@ langchain
 langchain-openai
 langchain-community==0.0.19
 unstructured
+=======
+numpy
+pandas
+streamlit 
+openai
+python-dotenv
+streamlit-folium
+streamlit-geolocation
+fastapi==0.115.0
+langchain
+langchain-openai
+langchain-community==0.0.19
+unstructured
+>>>>>>> e955b875b1abb227f57a805056f2826b0d7d4d87
 faiss-cpu

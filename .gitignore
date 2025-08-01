@@ -1,6 +1,14 @@
+<<<<<<< HEAD
 .env
 .ipynb
 .zip
 .pptx
 .hwp
+=======
+.env
+.ipynb
+.zip
+.pptx
+.hwp
+>>>>>>> e955b875b1abb227f57a805056f2826b0d7d4d87
 .mp4
